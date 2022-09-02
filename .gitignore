@@ -1,0 +1,14 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+# SAM
+.aws-sam/
+samconfig.toml
+
+# Python
+**/__pycache__/
+**/*.pyc
+
+# General
+**/*.zip
+**/.DS_Store

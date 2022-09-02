@@ -1,0 +1,239 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  LoadSampleData:
+    Type: String
+    Default: Yes
+    AllowedValues:
+      - Yes
+      - No
+
+Conditions:
+  ShouldLoadSampleData: !Equals [ !Ref LoadSampleData, "Yes" ]
+
+Resources:
+  DDBTable:
+    Type: 'AWS::DynamoDB::Table'
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      TableName: !Sub "${AWS::StackName}-ddb-table"
+      KeySchema:
+        - AttributeName: Email
+          KeyType: HASH
+      AttributeDefinitions:
+        - AttributeName: Email
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+
+  ApiGwDDBGetItemRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: apigateway.amazonaws.com
+      Policies:
+        - PolicyName: getPolicyC36434CE
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !GetAtt DDBTable.Arn
+
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${AWS::StackName}-api"
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  ApiGatewayCWLogsIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: apigateway.amazonaws.com
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCWLogsIAMRole.Arn
+    DependsOn:
+      - ApiGateway
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref ApiGateway
+      Description: Automatically created by the RestApi construct
+    DependsOn:
+      - ApiGatewayResourceItem
+      - ApiGatewayResourceItemEmail
+      - ApiGatewayResourceItemEmailGET
+
+  ApiGatewayStageProd:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: prod
+      RestApiId: !Ref ApiGateway
+      DeploymentId: !Ref ApiGatewayDeployment
+
+  ApiGatewayResourceItem:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      PathPart: item
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      RestApiId: !Ref ApiGateway
+
+  ApiGatewayResourceItemEmail:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      PathPart: '{email}'
+      ParentId: !Ref ApiGatewayResourceItem
+      RestApiId: !Ref ApiGateway
+
+  ApiGatewayResourceItemEmailGET:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: GET
+      ResourceId: !Ref ApiGatewayResourceItemEmail
+      RestApiId: !Ref ApiGateway
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:dynamodb:action/GetItem"
+        Credentials: !GetAtt ApiGwDDBGetItemRole.Arn
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: NEVER
+        RequestTemplates:
+          application/json: !Sub |
+            {
+              "TableName": "${DDBTable}",
+              "Key": {
+                "Email": { "S": "$method.request.path.email" }
+              }
+            }
+        IntegrationResponses:
+          - SelectionPattern: '200'
+            StatusCode: '200'
+            ResponseTemplates:
+              application/json: |
+                #set($inputRoot = $input.path('$').Item)
+                {
+                  "Email": "$inputRoot.Email.S",
+                  "CustomerCode": "$inputRoot.CustomerCode.S",
+                  "Orders": [
+                    #foreach($ord in $inputRoot.Orders.L)
+                      {
+                        "SalesRef": "$ord.M.SalesRef.S",
+                        "SaleType": "$ord.M.SaleType.S",
+                        "LayByNo": "$ord.M.LayByNo.S",
+                        "LayByStatus": "$ord.M.LayByStatus.S",
+                        "PaymentType": "$ord.M.PaymentType.S",
+                        "StoreName": "$ord.M.StoreName.S",
+                        "Date": "$ord.M.Date.S",
+                        "TotalPrice": "$ord.M.TotalPrice.S",
+                        "Items": [
+                          #foreach($itm in $ord.M.Items.L)
+                          {
+                            "A": "$itm.M.A.S",
+                            "C": "$itm.M.C.S"
+                          }#if($foreach.hasNext),#end
+                          #end
+                        ]
+                      }#if($foreach.hasNext),#end
+                    #end
+                  ]
+                }
+
+          - SelectionPattern: '400'
+            StatusCode: '400'
+            ResponseTemplates:
+              application/json: |
+                { "error": "Bad input!" }
+
+          - SelectionPattern: '5\d{2}'
+            StatusCode: '500'
+            ResponseTemplates:
+              application/json: |
+                { "error": "Internal Service Error!" }
+      MethodResponses:
+        - StatusCode: '200'
+        - StatusCode: '400'
+        - StatusCode: '500'
+
+  ###################################################################################
+  # SAMPLE DATA LOAD
+  #
+  # Remove the following two resources if you don't want to load the sample data,
+  # or optionally just pass "no" in the LoadSampleData parameter
+  ###################################################################################
+  CustomResourceAddDDBDataFunction:
+    Type: AWS::Serverless::Function
+    Condition: ShouldLoadSampleData
+    Properties:
+      CodeUri: custom_resource_load_data/
+      Handler: app.lambda_handler
+      Runtime: python3.9
+      Timeout: 30
+      MemorySize: 128
+      Architectures:
+        - arm64
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref DDBTable
+  TestData:
+    Type: Custom::PopulateDynamoDB
+    Condition: ShouldLoadSampleData
+    Properties:
+      ServiceToken: !GetAtt CustomResourceAddDDBDataFunction.Arn
+      TableName: !Ref DDBTable
+      Items:
+        - Email: "person1@gmail.com"
+          CustomerCode: "0123-1234567890"
+          SalesRef: "0150-0123456789"
+          Order:
+            SalesRef: "0150-0123456789"
+            SaleType: "XYZAB"
+            LayByNo: "0150-0123456789"
+            LayByStatus: "Completed"
+            PaymentType: " "
+            StoreName: "Store At Location"
+            Date: "12 Mar 2015 10:35"
+            TotalPrice: "44.9900"
+            Items:
+              - A: "b"
+                C: "812ndi9"
+        - Email: "person2@gmail.com"
+          CustomerCode: "0123-1234567890"
+          SalesRef: "0591-2345678901"
+          Order:
+            SalesRef: "0591-2345678901"
+            SaleType: "LAYBY"
+            LayByNo: "0591-3456789012"
+            LayByStatus: "Cancelled"
+            PaymentType: "EFT_"
+            StoreName: "Other Store Location"
+            Date: "21 Feb 2019 14:38"
+            TotalPrice: "129.0000"
+            Items:
+              - A: "i"
+                C: "jxb2d"
+
+Outputs:
+  ApiGatewayUrl:
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${ApiGatewayStageProd}"

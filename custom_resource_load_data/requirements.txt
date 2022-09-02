@@ -1,0 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+boto3
+crhelper
+boto3-stubs[dynamodb]
